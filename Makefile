@@ -1,0 +1,12 @@
+CC = clang
+CFLAGS = -m64 -Wall -Werror -std=c99
+BINARY = png-decoder
+INCLUDES = -I include/
+LIBDIR = 
+LIBRARIES = 
+TEST = test/*.c
+SOURCES = src/*.c
+
+all:
+	$(CC) -g $(CFLAGS) $(INCLUDES) $(LIBDIR) $(SOURCES) \
+		$(LIBRARIES) $(TEST) -o bin/$(BINARY)
