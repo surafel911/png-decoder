@@ -3,7 +3,7 @@ CFLAGS = -m64 -Wall -Werror -std=c99
 BINARY = png-decoder
 INCLUDES = -I include/
 LIBDIR = 
-LIBRARIES = 
+LIBRARIES = -l m
 TEST = test/*.c
 SOURCES = src/*.c
 
