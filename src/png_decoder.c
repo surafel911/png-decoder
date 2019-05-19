@@ -23,7 +23,14 @@
 	(10L << 40) | (13L << 32) | (71L << 24) | \
 	(78L << 16) | (80L << 8) | (137L))
 
-#define HUFF_CODE_LEN_DATA	
+#define PNG_MAX_BIT_LENGTHS			19
+#define PNG_MAX_CODE_SYMBOLS		288
+
+enum _png_block_type {
+	PNG_NO_COMPRESSION,
+	PNG_FIXED_HUFFMAN_COMPRESSION,
+	PNG_DYNAMIC_HUFFMAN_COMPRESSION,
+}
 
 struct _png_chunk_header {
 	uint32_t length;
@@ -59,7 +66,12 @@ struct _png_zlib_header {
 	uint8_t cmf, flg;
 } __packed;
 
-struct _png_zlib_block {
+struct _png_zlib_block_header {
+	bool final;
+	enum _png_block_type block_type;
+};
+
+struct _png_zlib_block_format {
 	uint16_t list, dist, clen;
 };
 
@@ -127,6 +139,81 @@ _png_ihdr_read_chunk(FILE* file, struct _png_ihdr_chunk* ihdr)
 	_png_chunk_read_footer(file, &footer);
 }
 
+static void
+_png_zlib_read_header(FILE* file, struct _png_zlib_header* header)
+{
+	fread(header, sizeof(*header), 1, file);
+
+#if 0
+	printf("\tCM: %d\n\tCINFO: %d\n\tFDICT: %d\n\tFLEVEL: %d\n",
+		zlib.cmf & ((1 << 4) - 1), zlib.cmf >> 4, zlib.flg & (1 << 5), zlib.flg >> 6);
+#endif
+
+	if ((zlib.flg & (1 << 5))) {
+		puts("ZLIB DICTID flag present.");
+		exit(-1);
+	}
+}
+
+static void
+_png_zlib_block_read_header(FILE* file, struct _png_zlib_block_header* header)
+{
+	uint8_t bytes[2];
+
+	bytes[0] = fgetc(file);
+
+	header->final = bytes[0] & 1;
+	header->block_type = (bytes[0] & (3 << 1)) >> 1;
+
+#if 0
+	printf("BFINAL: %d BTYPE: %d\n", (int)header->final, (int)header->block_type);
+#endif
+}
+
+/* This code is most likely for BTYPE=2 */
+static void
+_png_zlib_block_read_bit_lengths(FILE* file,
+	struct _png_zlib_block_format* format;
+	uint8_t bit_lengths_count[PNG_MAX_BIT_LENGTHS])
+{
+	uint8_t bytes[2];
+
+	fread(&bytes, sizeof(bytes), 1, file);
+
+	format.list = ((bytes[1] & ~((1 << 3) - 1)) >> 3) + 257;
+	format.dist = ((bytes[1] & ((1 << 3) - 1)) << 5 |
+		(bytes[0] & (3 << 5)) >> 6) + 1;
+	format.clen = (bytes[0] & ((1 << 4) - 1)) + 4;
+
+#if 1
+	printf("list: %d dist: %d clen: %d\n", block.list, block.dist,
+		block.clen);
+#endif
+
+	bytes[0] = fgetc(file);
+	bytes[1] = fgetc(file);
+	for (int i = 0; i < block.clen; i++) {
+		if (bit < 5) {
+			bit_lengths_count[i] = (bytes[0] & (7 << (5 - bit))) >> (5 - bit);
+			bit += 3;
+		} else {
+			remainder = 7 - bit;
+			bit_lengths_count[i] = (bytes[0] & (7 >> (remainder))) |
+				(bytes[1] & (7 << bit) >> bit);
+		
+			bytes[0] = bytes[1];
+			bytes[1] = fgetc(file);
+			bit = remainder;
+		}
+	}
+
+#if 0
+	for (inti = 0; i < format.clen; i++) {
+		printf("%d\n", bit_lengths_count[i]);
+	}
+#endif
+}
+
 void
 png_load(const char* path, struct png_image* image)
 {
@@ -158,58 +245,11 @@ png_load(const char* path, struct png_image* image)
 
 	/* Starting ZLIB Decoding Implementation */
 
-	static const uint8_t hclen_code_lens[] = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3,
+	static const uint8_t bit_lens[] = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3,
 		13, 2, 14, 1, 15};
 
 	struct _png_zlib_header zlib;
 	struct _png_zlib_block block;
-	
-	uint8_t b, bit, remainder, bytes[2],
-		hlen_code_len_counts[sizeof(hlen_code_len)],
-		hclen_code_len_table[sizeof(hlen_code_lens)];
-
-	fread(&zlib, sizeof(zlib), 1, file);
-
-	printf("\tCM: %d\n\tCINFO: %d\n\tFDICT: %d\n\tFLEVEL: %d\n",
-		zlib.cmf & ((1 << 4) - 1), zlib.cmf >> 4, zlib.flg & (1 << 5), zlib.flg >> 6);
-
-	if ((zlib.flg & (1 << 5))) {
-		fseek(file, 4, SEEK_CUR);
-	}
-
-	b = fgetc(file);
-	printf("BFINAL: %d BTYPE: %d\n", b & 1, (b & (3 << 1)) >> 1);
-
-	fread(&bytes, sizeof(bytes), 1, file);
-
-	block.list = ((bytes[1] & ~((1 << 3) - 1)) >> 3) + 257;
-	block.dist = ((bytes[1] & ((1 << 3) - 1)) << 5 | (bytes[0] & (3 << 5)) >> 6) + 1;
-	block.clen = (bytes[0] & ((1 << 4) - 1)) + 4;
-
-	printf("list: %d dist: %d clen: %d\n", block.list, block.dist,
-		block.clen);
-
-	bytes[0] = fgetc(file);
-	bytes[1] = fgetc(file);
-	for (int i = 0; i < block.clen; i++) {
-		if (bit < 5) {
-			code_len_count[i] = (bytes[0] & (7 << (5 - bit))) >> (5 - bit);
-			bit += 3;
-		} else {
-			remainder = 7 - bit;
-			code_len_count[i] = (bytes[0] & (7 >> (remainder))) | (bytes[1] & (7 << bit) >> bit);
-		
-			bytes[0] = bytes[1];
-			bytes[1] = fgetc(file);
-			bit = remainder;
-		}
-	}
-
-	for (int i = 0; i < block.clen; i++) {
-		printf("%d ", code_len_count[i]);
-	}
-
-	puts("");
 
 	fclose(file);
 }
