@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 #define __packed		__attribute__((packed))
 
@@ -23,14 +24,14 @@
 	(10L << 40) | (13L << 32) | (71L << 24) | \
 	(78L << 16) | (80L << 8) | (137L))
 
-#define PNG_MAX_BIT_LENGTHS			19
-#define PNG_MAX_CODE_SYMBOLS		288
+#define PNG_MAX_BIT_LENGTHS			19 // max number of bit lenghs
+#define PNG_MAX_CODE_SYMBOLS		288 // 256 code literals, end code, some length code, etc.
 
 enum _png_block_type {
 	PNG_NO_COMPRESSION,
 	PNG_FIXED_HUFFMAN_COMPRESSION,
 	PNG_DYNAMIC_HUFFMAN_COMPRESSION,
-}
+};
 
 struct _png_chunk_header {
 	uint32_t length;
@@ -72,12 +73,10 @@ struct _png_zlib_block_header {
 };
 
 struct _png_zlib_block_format {
-	uint16_t list, dist, clen;
+	uint16_t lit, dist, clen;
 };
 
-struct _png_context {
-	uint8_t* data;
-	size_t size;
+struct _png_huffman_tree {
 };
 
 static uint32_t
@@ -144,12 +143,7 @@ _png_zlib_read_header(FILE* file, struct _png_zlib_header* header)
 {
 	fread(header, sizeof(*header), 1, file);
 
-#if 0
-	printf("\tCM: %d\n\tCINFO: %d\n\tFDICT: %d\n\tFLEVEL: %d\n",
-		zlib.cmf & ((1 << 4) - 1), zlib.cmf >> 4, zlib.flg & (1 << 5), zlib.flg >> 6);
-#endif
-
-	if ((zlib.flg & (1 << 5))) {
+	if (header->flg & (1 << 5)) {
 		puts("ZLIB DICTID flag present.");
 		exit(-1);
 	}
@@ -164,54 +158,46 @@ _png_zlib_block_read_header(FILE* file, struct _png_zlib_block_header* header)
 
 	header->final = bytes[0] & 1;
 	header->block_type = (bytes[0] & (3 << 1)) >> 1;
+}
 
-#if 0
-	printf("BFINAL: %d BTYPE: %d\n", (int)header->final, (int)header->block_type);
-#endif
+static uint8_t
+_png_read_bits(FILE* file, const uint8_t bits)
+{
+	static uint8_t byte = 0, next_byte = 0, bit_count = 0;
+
+	uint8_t value;
+
+	if (bits < 0 || bits > 8) {
+		puts("Wrong bits.");
+		exit(-1);
+	}
+
+	// TODO: Rough idea of what's supposed to happen. Working is another story...
+	if (bit_count >= bits) {
+		bit_count -= bits;
+		value = (byte & (((1 << bits) - 1) << bit_count)) >> bit_count;
+	} else {
+		next_byte = fgetc(file);
+		value = ((byte & ((1 << bit_count) - 1)) << (bits - bit_count)) | (next_byte & (((1 << (bits - bit_count)) - 1) << (8 - bits - bit_count))) >> (8 - bits - bit_count);
+		byte = next_byte;
+		bit_count -= bits;
+	}
+
+	return value;
 }
 
 /* This code is most likely for BTYPE=2 */
 static void
-_png_zlib_block_read_bit_lengths(FILE* file,
-	struct _png_zlib_block_format* format;
-	uint8_t bit_lengths_count[PNG_MAX_BIT_LENGTHS])
+_png_zlib_block_read_format(FILE* file,
+	struct _png_zlib_block_format* format)
 {
 	uint8_t bytes[2];
 
 	fread(&bytes, sizeof(bytes), 1, file);
 
-	format.list = ((bytes[1] & ~((1 << 3) - 1)) >> 3) + 257;
-	format.dist = ((bytes[1] & ((1 << 3) - 1)) << 5 |
-		(bytes[0] & (3 << 5)) >> 6) + 1;
-	format.clen = (bytes[0] & ((1 << 4) - 1)) + 4;
-
-#if 1
-	printf("list: %d dist: %d clen: %d\n", block.list, block.dist,
-		block.clen);
-#endif
-
-	bytes[0] = fgetc(file);
-	bytes[1] = fgetc(file);
-	for (int i = 0; i < block.clen; i++) {
-		if (bit < 5) {
-			bit_lengths_count[i] = (bytes[0] & (7 << (5 - bit))) >> (5 - bit);
-			bit += 3;
-		} else {
-			remainder = 7 - bit;
-			bit_lengths_count[i] = (bytes[0] & (7 >> (remainder))) |
-				(bytes[1] & (7 << bit) >> bit);
-		
-			bytes[0] = bytes[1];
-			bytes[1] = fgetc(file);
-			bit = remainder;
-		}
-	}
-
-#if 0
-	for (inti = 0; i < format.clen; i++) {
-		printf("%d\n", bit_lengths_count[i]);
-	}
-#endif
+	format->lit = _png_read_bits(file, 5);
+	format->dist = _png_read_bits(file, 5);
+	format->clen = _png_read_bits(file, 4);
 }
 
 void
@@ -245,11 +231,58 @@ png_load(const char* path, struct png_image* image)
 
 	/* Starting ZLIB Decoding Implementation */
 
-	static const uint8_t bit_lens[] = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3,
-		13, 2, 14, 1, 15};
+#if 0
+	static const uint8_t code_lengths_order[] = {16, 17, 18, 0, 8, 7, 9, 6, 10,
+		5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
+#endif
 
 	struct _png_zlib_header zlib;
-	struct _png_zlib_block block;
+	struct _png_zlib_block_header block;
+	struct _png_zlib_block_format format;
+
+//	struct _png_huffman_tree tree;
+
+	_png_zlib_read_header(file, &zlib);
+
+#if 1
+	printf("ZLIB header:\n");
+	printf("\tCM: %d\n\tCINFO: %d\n\tFDICT: %d\n\tFLEVEL: %d\n",
+		zlib.cmf & ((1 << 4) - 1), zlib.cmf >> 4, zlib.flg & (1 << 5), zlib.flg >> 6);
+#endif
+
+	_png_zlib_block_read_header(file, &block);
+
+#if 1
+	printf("Block header:\n");
+	printf("\tBFINAL: %d BTYPE: %d\n", (int)block.final, (int)block.block_type);
+#endif
+
+	_png_zlib_block_read_format(file, &format);
+
+#if 1
+	printf("Block format:\n");
+	printf("\tHLIT: %d\n\tHDIST: %d\n\tHCLEN: %d\n", format.lit, format.dist, format.clen);
+#endif
+
+#if 0
+	// Step 1
+	uint8_t code_length_code_index[19] = {16, 17, 18, ...},
+		code_lengths[19];
+
+	_png_huff_get_code_lengths(code_lengths)
+	{
+		memset(code_length_count, 0, sizeof(code_length_count));
+
+		for (int i = 0; i < sizeof(code_length_count); i++) {
+			code_lengths[code_lengths[i]] = _png_read_bits(3);
+		}
+	}
+
+	// Step 2
+	
+	uint8_t max_bits // find the largest code length?
+
+#endif
 
 	fclose(file);
 }
