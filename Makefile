@@ -10,3 +10,8 @@ SOURCES = src/*.c
 all:
 	$(CC) -g $(CFLAGS) $(INCLUDES) $(LIBDIR) $(SOURCES) \
 		$(LIBRARIES) $(TEST) -o bin/$(BINARY)
+
+export:
+	$(CC) -O3 $(CFLAGS) $(INCLUDES) $(LIBDIR) $(SOURCES) \
+		$(LIBRARIES) $(TEST) -o bin/$(BINARY)
+

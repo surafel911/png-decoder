@@ -1,14 +1,14 @@
 #include <png-decoder/png_decoder.h>
 
-#include <math.h>
 #include <stdio.h>
-#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 
-#define __packed		__attribute__((packed))
+#include <png-decoder/zlib_inflate.h>
+
+#define __packed 		__attribute__((packed))
 
 #define _PNG_TYPE(x)		*((uint32_t*)x)
 
@@ -24,265 +24,387 @@
 	(10L << 40) | (13L << 32) | (71L << 24) | \
 	(78L << 16) | (80L << 8) | (137L))
 
-#define PNG_MAX_BIT_LENGTHS			19 // max number of bit lenghs
-#define PNG_MAX_CODE_SYMBOLS		288 // 256 code literals, end code, some length code, etc.
+#define PNG_DEBUG
 
-enum _png_block_type {
-	PNG_NO_COMPRESSION,
-	PNG_FIXED_HUFFMAN_COMPRESSION,
-	PNG_DYNAMIC_HUFFMAN_COMPRESSION,
+enum png_zlib_block_type {
+	PNG_BLOCK_TYPE_NONE,
+	PNG_BLOCK_TYPE_FIXED,
+	PNG_BLOCK_TYPE_DYNAMIC,
 };
 
-struct _png_chunk_header {
-	uint32_t length;
-	uint32_t type;
-};
+struct png_stream_signature {
+	uint64_t signature;
+} __packed;
 
-struct _png_chunk_footer {
+struct png_stream_chunk_header {
+	uint32_t chunk_length;
+	uint32_t chunk_type;
+} __packed;
+
+struct png_stream_chunk_footer {
 	uint32_t crc;
-};
+} __packed;
 
-struct _png_ihdr_chunk {
+struct png_stream_ihdr_chunk {
 	uint32_t width, height;
 	uint8_t depth, color, compression, filter, interlace;
 } __packed;
 
-struct _png_srgb_chunk {
+struct png_stream_srgb_chunk {
 	uint8_t rendering;
 } __packed;
 
-struct _png_chrm_chunk {
+struct png_stream_chrm_chunk {
 	uint32_t white_point[2], red[2], green[2], blue[2];
 } __packed;
 
-struct _png_gama_chunk {
-	uint32_t gamma;
+struct png_stream_gama_chunk {
+	uint32_t gama;
 } __packed;
 
-struct _png_bkgd_chunk {
+struct png_stream_bkgd_chunk {
 	uint16_t red, green, blue;
 } __packed;
 
-struct _png_zlib_header {
-	uint8_t cmf, flg;
-} __packed;
-
-struct _png_zlib_block_header {
-	bool final;
-	enum _png_block_type block_type;
-};
-
-struct _png_zlib_block_format {
-	uint16_t lit, dist, clen;
-};
-
-struct _png_huffman_tree {
-};
+static void
+_png_fatal_error(const char* message)
+{
+	puts(message);
+	exit(-1);
+}
 
 static uint32_t
 _png_be_to_le(uint32_t value)
 {
-	uint8_t* bytes;
-
-	bytes = (uint8_t*)&value;
+	uint8_t* bytes = (uint8_t*)&value;
 
 	return ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]);
 }
 
 static void
-_png_chunk_read_header(FILE* file, struct _png_chunk_header* header)
+_png_stream_png_signature(FILE* file, 
+	struct png_stream_signature* signature)
 {
-	fread(header, sizeof(*header), 1, file);
-	header->length = _png_be_to_le(header->length);
+	fread(signature, sizeof(*signature), 1, file);
 }
 
 static void
-_png_chunk_read_footer(FILE* file, struct _png_chunk_footer* footer)
+_png_verify_png_signature(struct png_stream_signature* signature)
+{
+	if (signature->signature == PNG_SIGNATURE) {
+		puts("[PNG] PNG signature found.");
+	} else {
+		_png_fatal_error("[PNG] PNG signature not found.");
+	}
+}
+
+static void
+_png_stream_ihdr_chunk(FILE* file, struct png_stream_ihdr_chunk* chunk)
+{
+	fread(chunk, sizeof(*chunk), 1, file);
+	chunk->width = _png_be_to_le(chunk->width);
+	chunk->height = _png_be_to_le(chunk->height);
+}
+
+static void
+_png_verify_ihdr_header(struct png_stream_chunk_header* header)
+{
+	if (header->chunk_type == PNG_IHDR_TYPE && header->chunk_length == 13) {	
+		puts("\t[PNG] IHDR signature found.");
+	} else {
+		_png_fatal_error("\t[PNG] IHDR signature not found.");
+	}
+}
+
+#if 0
+
+static void
+_png_stream_zlib_dynamic_huffman_code_lengths_tree_construct(FILE* file,
+	struct png_zlib_block_format* block_format,
+	struct png_huffman_tree* tree)
+{
+	unsigned int index, code_length_code_lengths[19];
+
+	_png_stream_zlib_dynamic_code_lengths_code_lengths(file, block_format,
+			code_length_code_lengths);
+
+	for (index = 0; index < 19; index++) {
+		tree->lengths[index] = code_length_code_lengths[index];
+	}
+
+	for (; index < 288; index++) {
+		tree->lengths[index] = 0;
+	}
+
+	_png_huffman_tree_construct(tree, 288, 7);
+
+#ifdef PNG_DEBUG
+	for (int index = 0; index < 288; index++) {
+		printf("%u ", tree->symbols[index]);
+	}
+	puts("");
+#endif
+}
+
+#if 1
+
+static unsigned int
+_png_stream_huffman_decode(FILE* file, struct png_huffman_tree* tree)
+{
+	return 0;
+}
+
+static void
+_png_stream_zlib_dynamic_literal_distance_lengths(FILE* file,
+	struct png_zlib_block_format* block_format,
+	struct png_huffman_tree* code_lengths_tree,
+	unsigned int literal_distance_table[PNG_NUM_DEFLATE_SYMBOLS +
+		PNG_NUM_DISTANCE_SYMBOLS])
+{
+	unsigned int value, repeat, symbol, limit = block_format->nlit +
+		block_format->ndist;
+
+	for (int index = 0; index < limit;) {
+		symbol = _png_stream_huffman_decode(file, code_lengths_tree);
+
+		if (symbol <= 15) {
+			literal_distance_table[index++] = symbol;
+			continue;
+		} else {
+			switch (symbol) {
+			case 16:
+				value = literal_distance_table[index];
+				repeat = _png_stream_bits(file, 2) + 3;
+				break;
+			case 17:
+				value = 0;
+				repeat = _png_stream_bits(file, 3) + 3;
+				break;
+			case 18:
+				value = 0;
+				repeat = _png_stream_bits(file, 7) + 11;
+				break;
+			default:
+				_png_fatal_error("Mega decompression error");
+			}
+
+			for (int n = 1; n <= repeat; n++) {
+				literal_distance_table[index + n] = value;
+			}
+			index += repeat;
+		}
+	}
+}
+
+static void
+_png_zlib_dynamic_huffman_literals_tree_construct(
+	struct png_zlib_block_format* block_format,
+	struct png_huffman_tree* literals_tree,
+	unsigned int literal_distance_table[PNG_NUM_DEFLATE_SYMBOLS +
+		PNG_NUM_DISTANCE_SYMBOLS])
+{
+
+}
+
+static void
+_png_zlib_dynamic_huffman_distances_tree_construct(
+	struct png_zlib_block_format* block_format,
+	struct png_huffman_tree* distances_tree,
+	unsigned int literal_distance_table[PNG_NUM_DEFLATE_SYMBOLS +
+		PNG_NUM_DISTANCE_SYMBOLS])
+{
+}
+
+static void
+_png_stream_zlib_dynamic_inflate_block(FILE* file, uint8_t* stream,
+	struct png_huffman_tree* literals_tree,
+	struct png_huffman_tree* distances_tree)
+{
+	unsigned int symbol, distance;
+
+	for (;;) {
+		symbol = _png_stream_huffman_decode(file, literals_tree);
+
+		if (symbol == 256) {
+			break;
+		}
+
+		if (symbol < 256) {
+			// write symbol
+		} else {
+			distance = _png_stream_huffman_decode(file, distances_tree);
+			memcpy(stream, stream - distance, distance);
+			stream += distance;
+		}
+	}
+}
+#endif
+
+static void
+_png_stream_zlib_inflate_dynamic_huffman_block(FILE* file, uint8_t* data)
+{
+	unsigned int literal_distance_table[PNG_NUM_DEFLATE_SYMBOLS + 
+		PNG_NUM_DISTANCE_SYMBOLS];
+
+	struct png_huffman_tree code_lengths_tree, literals_tree, distances_tree;
+	struct png_zlib_block_format block_format;
+
+	_png_stream_zlib_block_format(file, &block_format);
+
+	_png_stream_zlib_dynamic_huffman_code_lengths_tree_construct(file,
+		&block_format, &code_lengths_tree);
+#if 1
+	_png_stream_zlib_dynamic_literal_distance_lengths(file,
+		&block_format, &code_lengths_tree, literal_distance_table);
+
+	_png_zlib_dynamic_huffman_literals_tree_construct(&block_format,
+		&literals_tree,	literal_distance_table);
+	_png_zlib_dynamic_huffman_distances_tree_construct(&block_format,
+		&distances_tree, literal_distance_table);
+
+	_png_stream_zlib_dynamic_inflate_block(file, data, &literals_tree,
+		&distances_tree);
+#endif
+}
+
+static void
+_png_stream_zlib_inflate_fixed_huffman_block(FILE* file, uint8_t* data)
+{
+	_png_fatal_error("[PNG] Fixed huffman inflate not implementated.");
+}
+
+static void
+_png_stream_zlib_inflate_block(FILE* file, uint8_t* data,
+	struct png_zlib_block_header* block_header)
+{
+	if (block_header->block_type == PNG_BLOCK_TYPE_NONE) {
+		_png_stream_zlib_inflate_uncompressed_block(file, data);
+	} else {
+		if (block_header->block_type == PNG_BLOCK_TYPE_DYNAMIC) {
+			_png_stream_zlib_inflate_dynamic_huffman_block(file, data);
+		} else {
+			_png_stream_zlib_inflate_fixed_huffman_block(file, data);
+		}
+	}
+}
+
+#endif
+
+void
+png_stream_chunk_header(FILE* file,
+	struct png_stream_chunk_header* header)
+{
+	fread(header, sizeof(*header), 1, file);
+	header->chunk_length = _png_be_to_le(header->chunk_length);
+}
+
+void
+png_stream_chunk_footer(FILE* file,
+	struct png_stream_chunk_footer* footer)
 {
 	fread(footer, sizeof(*footer), 1, file);
 	footer->crc = _png_be_to_le(footer->crc);
 }
 
-static void
-_png_verify_signature(FILE* file)
+void
+png_check_png_signature(FILE* file)
 {
-	uint64_t signature;
+	struct png_stream_signature signature;
 
-	fread(&signature, sizeof(signature), 1, file);
-	if (signature == PNG_SIGNATURE) {
-		puts("PNG signature found.");
-	} else {
-		puts("PNG signature corrupted.");
-		exit(-1);
-	}
+	_png_stream_png_signature(file, &signature);
+	_png_verify_png_signature(&signature);
 }
 
-static void
-_png_ihdr_read_chunk(FILE* file, struct _png_ihdr_chunk* ihdr)
+void
+png_check_ihdr_signature(FILE* file, struct png_stream_ihdr_chunk* chunk)
 {
-	struct _png_chunk_header header;
-	struct _png_chunk_footer footer;
+	struct png_stream_chunk_header header;
+	struct png_stream_chunk_footer footer;
 
-	_png_chunk_read_header(file, &header);
-	if (header.type == PNG_IHDR_TYPE && header.length == 13) {	
-		puts("IHDR signature found.");
-	} else {
-		puts("IHDR signature corrupted.");
-		exit(-1);
-	}
+	png_stream_chunk_header(file, &header);
 
-	fread(ihdr, sizeof(*ihdr), 1, file);
-	ihdr->width = _png_be_to_le(ihdr->width);
-	ihdr->height = _png_be_to_le(ihdr->height);
+	_png_verify_ihdr_header(&header);
+	_png_stream_ihdr_chunk(file, chunk);
 
-	_png_chunk_read_footer(file, &footer);
+	png_stream_chunk_footer(file, &footer);
 }
 
-static void
-_png_zlib_read_header(FILE* file, struct _png_zlib_header* header)
-{
-	fread(header, sizeof(*header), 1, file);
+#if 0
 
-	if (header->flg & (1 << 5)) {
-		puts("ZLIB DICTID flag present.");
-		exit(-1);
-	}
+void
+png_check_zlib_header(FILE* file, struct png_zlib_header* header)
+{
+	_png_stream_zlib_header(file, header);
+	_png_verify_zlib_header(header);
 }
 
-static void
-_png_zlib_block_read_header(FILE* file, struct _png_zlib_block_header* header)
+void
+png_zlib_inflate_block(FILE* file, uint8_t* output)
 {
-	uint8_t bytes[2];
+	struct png_zlib_block_header header;
 
-	bytes[0] = fgetc(file);
-
-	header->final = bytes[0] & 1;
-	header->block_type = (bytes[0] & (3 << 1)) >> 1;
+	_png_stream_zlib_block_header(file, &header);
+	_png_stream_zlib_inflate_block(file, output, &header);
 }
 
-static uint8_t
-_png_read_bits(FILE* file, const uint8_t bits)
-{
-	static uint8_t byte = 0, next_byte = 0, bit_count = 0;
-
-	uint8_t value;
-
-	if (bits < 0 || bits > 8) {
-		puts("Wrong bits.");
-		exit(-1);
-	}
-
-	// TODO: Rough idea of what's supposed to happen. Working is another story...
-	if (bit_count >= bits) {
-		bit_count -= bits;
-		value = (byte & (((1 << bits) - 1) << bit_count)) >> bit_count;
-	} else {
-		next_byte = fgetc(file);
-		value = ((byte & ((1 << bit_count) - 1)) << (bits - bit_count)) | (next_byte & (((1 << (bits - bit_count)) - 1) << (8 - bits - bit_count))) >> (8 - bits - bit_count);
-		byte = next_byte;
-		bit_count -= bits;
-	}
-
-	return value;
-}
-
-/* This code is most likely for BTYPE=2 */
-static void
-_png_zlib_block_read_format(FILE* file,
-	struct _png_zlib_block_format* format)
-{
-	uint8_t bytes[2];
-
-	fread(&bytes, sizeof(bytes), 1, file);
-
-	format->lit = _png_read_bits(file, 5);
-	format->dist = _png_read_bits(file, 5);
-	format->clen = _png_read_bits(file, 4);
-}
+#endif
 
 void
 png_load(const char* path, struct png_image* image)
 {
 	FILE* file;
 
-	struct _png_ihdr_chunk ihdr;
-	struct _png_chunk_header chunk;
+	struct png_stream_ihdr_chunk ihdr_chunk;
+	struct png_stream_chunk_header chunk_header;
 
-	file= fopen(path, "rb");
-	if (file == NULL) {
-		puts("Bad path.");
+	file = fopen(path, "rb");
+
+	png_check_png_signature(file);
+	png_check_ihdr_signature(file, &ihdr_chunk);
+
+	png_stream_chunk_header(file, &chunk_header);
+	while (chunk_header.chunk_type != PNG_IDAT_TYPE) {
+#ifdef PNG_DEBUG
+		printf("\t[PNG] %4s chunk.\n", (char*)&chunk_header.chunk_type);
+#endif
+
+		fseek(file, chunk_header.chunk_length + 
+			sizeof(struct png_stream_chunk_footer), SEEK_CUR);
+		png_stream_chunk_header(file, &chunk_header);
 	}
 
-	_png_verify_signature(file);
-	_png_ihdr_read_chunk(file, &ihdr);
-
-	image->width = ihdr.width;
-	image->height = ihdr.height;
-
-	for (;;) {
-		_png_chunk_read_header(file, &chunk);
-		if (chunk.type == PNG_IDAT_TYPE) {
-			break;
-		}
-		fseek(file, chunk.length + 4, SEEK_CUR);
-	};
-
-	/* Here begins absolutely, offensive code... */
-
-	/* Starting ZLIB Decoding Implementation */
-
-#if 0
-	static const uint8_t code_lengths_order[] = {16, 17, 18, 0, 8, 7, 9, 6, 10,
-		5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
+#ifdef PNG_DEBUG
+	printf("\t[PNG] %4s chunk.\n", (char*)&chunk_header.chunk_type);
 #endif
 
-	struct _png_zlib_header zlib;
-	struct _png_zlib_block_header block;
-	struct _png_zlib_block_format format;
+	struct zlib_stream input = {};
+	struct zlib_stream output = {};
 
-//	struct _png_huffman_tree tree;
+	while (chunk_header.chunk_type != PNG_IEND_TYPE) {
+		input.buffer = realloc(input.buffer, input.size +
+			chunk_header.chunk_length);
 
-	_png_zlib_read_header(file, &zlib);
+		fread(input.buffer + input.size, sizeof(*input.buffer),
+			chunk_header.chunk_length, file);
 
-#if 1
-	printf("ZLIB header:\n");
-	printf("\tCM: %d\n\tCINFO: %d\n\tFDICT: %d\n\tFLEVEL: %d\n",
-		zlib.cmf & ((1 << 4) - 1), zlib.cmf >> 4, zlib.flg & (1 << 5), zlib.flg >> 6);
-#endif
-
-	_png_zlib_block_read_header(file, &block);
-
-#if 1
-	printf("Block header:\n");
-	printf("\tBFINAL: %d BTYPE: %d\n", (int)block.final, (int)block.block_type);
-#endif
-
-	_png_zlib_block_read_format(file, &format);
-
-#if 1
-	printf("Block format:\n");
-	printf("\tHLIT: %d\n\tHDIST: %d\n\tHCLEN: %d\n", format.lit, format.dist, format.clen);
-#endif
-
-#if 0
-	// Step 1
-	uint8_t code_length_code_index[19] = {16, 17, 18, ...},
-		code_lengths[19];
-
-	_png_huff_get_code_lengths(code_lengths)
-	{
-		memset(code_length_count, 0, sizeof(code_length_count));
-
-		for (int i = 0; i < sizeof(code_length_count); i++) {
-			code_lengths[code_lengths[i]] = _png_read_bits(3);
-		}
+		input.size += chunk_header.chunk_length;
+		fseek(file, sizeof(struct png_stream_chunk_footer), SEEK_CUR);
+		png_stream_chunk_header(file, &chunk_header);
 	}
-
-	// Step 2
-	
-	uint8_t max_bits // find the largest code length?
-
-#endif
 
 	fclose(file);
+
+	input.cursor = input.buffer;
+
+	output.size = (ihdr_chunk.width * ihdr_chunk.height) * 4;
+	output.buffer = malloc(output.size);
+	output.cursor = output.buffer;
+
+	zlib_inflate(&input, &output);
+
+	free(input.buffer);
+
+	image->width = ihdr_chunk.width;
+	image->height = ihdr_chunk.height;
+	image->data = output.buffer;
 }
