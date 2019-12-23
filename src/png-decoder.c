@@ -8,7 +8,11 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define _PNG_TYPE(x)		*((uint32_t*)x)
+#include <png-decoder/zlib-inflate.h>
+
+#define __packed		__attribute__((packed))
+
+#define _PNG_TYPE(x)	*((uint32_t*)x)
 
 #define PNG_IHDR_TYPE	_PNG_TYPE("IHDR")
 #define PNG_IDAT_TYPE	_PNG_TYPE("IDAT")
@@ -18,12 +22,8 @@
 #define PNG_GAMA_TYPE	_PNG_TYPE("gAMA")
 #define PNG_BKGD_TYPE	_PNG_TYPE("bKGD")
 
-#define PNG_SIGNATURE	((10L << 56) | (26L << 48) | \
-	(10L << 40) | (13L << 32) | (71L << 24) | \
-	(78L << 16) | (80L << 8) | (137L))
-
 #define PNG_MAX_BIT_LENGTHS			19 // max number of bit lenghs
-#define PNG_MAX_CODE_SYMBOLS		288 // 256 code literals, end code, some length code, etc.
+#define PNG_MAX_CODE_SYMBOLS		288 // 256 code literals, end code, some size code, etc.
 
 enum _png_block_type {
 	PNG_NO_COMPRESSION,
@@ -32,13 +32,16 @@ enum _png_block_type {
 };
 
 struct _png_chunk_header {
-	uint32_t length;
-	uint32_t type;
-};
+	uint32_t size;
+	union {
+		uint8_t name[4];
+		uint32_t type;
+	};
+} __packed;
 
 struct _png_chunk_footer {
 	uint32_t crc;
-};
+} __packed;
 
 struct _png_ihdr_chunk {
 	uint32_t width, height;
@@ -75,7 +78,7 @@ static void
 _png_chunk_read_header(FILE* file, struct _png_chunk_header* header)
 {
 	fread(header, sizeof(*header), 1, file);
-	header->length = _png_be_to_le(header->length);
+	header->size = _png_be_to_le(header->size);
 }
 
 static void
@@ -88,16 +91,18 @@ _png_chunk_read_footer(FILE* file, struct _png_chunk_footer* footer)
 static void
 _png_verify_signature(FILE* file)
 {
+ 	static uint8_t png_signature[] = {137, 80, 78, 71, 13, 10, 26, 10};
+
 	uint64_t signature;
 
 	fread(&signature, sizeof(signature), 1, file);
-	if (signature == PNG_SIGNATURE) {
+	if (signature == *(uint64_t*)png_signature) {
 		puts("PNG signature found.");
 	} else {
 		puts("PNG signature corrupted.");
 		exit(-1);
 	}
-
+}
 
 static void
 _png_ihdr_read_chunk(FILE* file, struct _png_ihdr_chunk* ihdr)
@@ -106,7 +111,7 @@ _png_ihdr_read_chunk(FILE* file, struct _png_ihdr_chunk* ihdr)
 	struct _png_chunk_footer footer;
 
 	_png_chunk_read_header(file, &header);
-	if (header.type == PNG_IHDR_TYPE && header.length == 13) {	
+	if (header.type == PNG_IHDR_TYPE && header.size == 13) {	
 		puts("IHDR signature found.");
 	} else {
 		puts("IHDR signature corrupted.");
@@ -126,7 +131,7 @@ png_load(const char* path, struct png_image* image)
 	FILE* file;
 
 	struct _png_ihdr_chunk ihdr;
-	struct _png_chunk_header chunk;
+	struct _png_chunk_header header;
 	struct zlib_stream input = {}, output = {};
 
 	file = fopen(path, "rb");
@@ -141,23 +146,36 @@ png_load(const char* path, struct png_image* image)
 	image->height = ihdr.height;
 
 	for (;;) {
-		_png_chunk_read_header(file, &chunk);
-		if (chunk.type == PNG_IDAT_TYPE) {
+		_png_chunk_read_header(file, &header);
+		if (header.type == PNG_IDAT_TYPE) {
 			break;
 		}
+
+		fseek(file, header.size + sizeof(uint32_t), SEEK_CUR);
 	}
 
 	for (;;) {
-		input.buffer = realloc(input.buffer, input.lenth += chunk.length);
-		fread(input.buffer, sizeof(uint8_t), chunk.length, file);
+		input.buffer = realloc(input.buffer, input.size + header.size);
+		fread(input.buffer + input.size, sizeof(*input.buffer), header.size, file);
+		input.size += header.size;
 
-		_png_chunk_read_header(file, &chunk);
-		if (chunk.type != PNG_IDAT_TYPE) {
+		fseek(file, sizeof(uint32_t), SEEK_CUR);
+		_png_chunk_read_header(file, &header);
+		if (header.type != PNG_IDAT_TYPE) {
 			break;
 		}
 	}
+	input.cursor = input.buffer;
 
-	zlib_decode(&input, &output);
+	printf("Input stream size: %zu\n", input.size);
+
+	output.size = (ihdr.width + ihdr.height) * 4;
+	output.buffer = malloc(output.size);
+	output.cursor = output.buffer;
+
+#if 1
+	zlib_inflate(&input, &output);
+#endif
 
 	fclose(file);
 }

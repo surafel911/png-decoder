@@ -1,4 +1,4 @@
-#include <png-decoder/png_decoder.h>
+#include <png-decoder/png-decoder.h>
 
 #include <stdio.h>
 #include <stdint.h>

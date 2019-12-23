@@ -1,4 +1,4 @@
-#include <png-decoder/zlib_inflate.h>
+#include <png-decoder/zlib-inflate.h>
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -28,7 +28,7 @@ enum _zlib_block_type {
 
 struct _zlib_header {
 	bool fdict;
-	unsigned char compression_method, compression_info,
+	uint8_t compression_method, compression_info,
 		flevel;
 };
 
@@ -38,17 +38,21 @@ struct _zlib_block_header {
 };
 
 struct _zlib_block_format {
-	unsigned short nlen;
-	unsigned char ndist, ncodes;
+	uint16_t nlen;
+	uint8_t ndist, ncodes;
 };
 
 struct _zlib_stream_uncompressed_header {
 	uint32_t length, nlength;
 };
 
+struct _zlib_huffman_tree_node {
+	uint8_t code, symbol, length;
+};
+
 struct _zlib_huffman_tree {
-	unsigned int ncodes, nbits, lengths[ZLIB_MAX_SYMBOLS],
-		symbols[ZLIB_MAX_SYMBOLS];
+	struct _zlib_huffman_tree_node* nodes;
+	size_t size;
 };
 
 static void
@@ -70,10 +74,10 @@ _zlib_stream_getc(struct zlib_stream* stream)
 }
 
 static uint8_t
-_zlib_stream_get_bits(const uint8_t byte, const uint8_t start_bit,
+_zlib_get_bits(const uint8_t byte, const uint8_t start_bit,
 	const uint8_t end_bit)
 {
-	return byte & (((1 << (end_bit - 1)) - 1) << (start_bit - 1));
+	return byte & (((1 << end_bit) - 1) << (start_bit - 1));
 }
 
 static uint8_t
@@ -147,9 +151,9 @@ _zlib_stream_read_header(struct zlib_stream* stream,
 	compression = _zlib_stream_getc(stream);
 	flags = _zlib_stream_getc(stream);
 
-	header->compression_method = _zlib_stream_get_bits(compression, 5, 1);
+	header->compression_method = _zlib_get_bits(compression, 4, 1);
 	header->compression_info = compression >> 4;
-	header->fdict = _zlib_stream_get_bits(flags, 6, 1);
+	header->fdict = _zlib_get_bits(flags, 6, 1);
 	header->flevel = flags >> 6;
 }
 
@@ -169,7 +173,7 @@ _zlib_stream_read_block_header(struct zlib_stream* stream,
 
 #ifdef ZLIB_DEBUG
 	printf("\t[ZLIB] Block Final: %d\n\t[ZLIB] Block Type: %d\n",
-		header->block_final, header->block_type);
+		block_header->block_final, block_header->block_type);
 #endif
 }
 
@@ -182,8 +186,9 @@ _zlib_stream_read_block_format(struct zlib_stream* stream,
 	block_format->ncodes = _zlib_stream_read_bits(stream, 4) + 4;
 
 #ifdef ZLIB_DEBUG
-	printf("\t[ZLIB] Block NLIT: %d\n\t[ZLIB] Block NDIST: %d.\n\t[ZLIB] \
-	Block NCODES: %d\n", format->nlen, format->ndist, format->ncodes);
+	printf("\t[ZLIB] Block NLIT: %d\n\t[ZLIB] Block NDIST: %d \
+	\n\t[ZLIB] Block NCODES: %d\n", block_format->nlen, block_format->ndist,
+	block_format->ncodes);
 #endif
 }
 
@@ -205,16 +210,16 @@ _zlib_stream_inflate_uncompressed_block(struct zlib_stream* input,
 
 static void
 _zlib_stream_read_code_length_code_lengths(struct zlib_stream* stream,
-	struct _zlib_block_format* block_format,
+	unsigned int ncodes,
 	unsigned int code_length_code_lengths[ZLIB_NUM_CODE_LENGTH_CODES])
 {
-	static unsigned int code_length_code_lengths_order[19] = {
+	static unsigned int code_length_code_lengths_order[] = {
 		16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
 	};
 
 	int index = 0;
 
-	for (; index < block_format->ncodes; index++) {
+	for (; index < ncodes; index++) {
 		code_length_code_lengths[code_length_code_lengths_order[index]] = 
 			_zlib_stream_read_bits(stream, 3);
 	}
@@ -224,74 +229,123 @@ _zlib_stream_read_code_length_code_lengths(struct zlib_stream* stream,
 	}
 }
 
-#if 1
+#ifdef ZLIB_DEBUG
 static void
-print_bits(void* ptr, size_t bytes)
+_zlib_print_bits(uint8_t b, uint8_t bits)
 {
-	char* n = ptr;
-
-	for (int i = bytes; i >= 0; i--) {
-		for (int j = 7; j >= 0; j--) {
-			printf("%u", (n[i] >> j) & 1);
-		}
-	}
-	puts("");
 }
+
+static void
+_zlib_print_byte(uint8_t b)
+{
+	for (int i = 7; i >= 0; i--) {
+		printf("%s", b & (1 << i) ? "1" : "0");
+	}
+}
+
+static int
+comp(const void* a, const void* b)
+{
+	return *(int*)a > *(int*)b;
+}
+
 #endif
 
+// TODO: Reimplement this function to use the huffman tree structure.
 static void
 _zlib_huffman_tree_construct(unsigned int* table,
-	unsigned int* lengths, const unsigned int codes, unsigned int bits)
+	unsigned int* lengths, const unsigned int ncodes)
 {
-	unsigned int index, code_length_counts[ZLIB_MAX_SYMBOLS],
-		next_code[ZLIB_MAX_SYMBOLS];
+	unsigned int index, max_length, next_code[ZLIB_MAX_SYMBOLS],
+		code_length_counts[ZLIB_MAX_SYMBOLS];
 
+	max_length = 0;
+	memset(next_code, 0, ZLIB_MAX_SYMBOLS);
+	memset(code_length_counts, 0, ZLIB_MAX_SYMBOLS);
 
-	for (index = 0; index < codes; index++) {
-		next_code[index] = 0;
-		code_length_counts[index] = 0;
-	}
-
-	for (index = 0; index < codes; index++) {
+	for (index = 0; index < 19; index++) {
 		code_length_counts[lengths[index]]++;
+
+		if (lengths[index] > max_length) {
+			max_length = lengths[index];
+		}
 	}
 
 	code_length_counts[0] = 0;
 
-	for (index = 1; index <= ZLIB_MAX_BITS; index++) {
+#ifdef ZLIB_DEBUG
+	puts("\nn\tclcl_count");
+	for (index = 0; index < 19; index++) {
+		printf("%d\t%u\n", index, code_length_counts[index]);
+	}
+#endif
+
+	for (index = 1; index <= max_length; index++) {
 		next_code[index] = (next_code[index - 1] +
 			code_length_counts[index - 1]) << 1;
 	}
 
-	for (index = 0; index < codes; index++) {
+#ifdef ZLIB_DEBUG
+	puts("\nn\tnext_code");
+	for (index = 1; index <= max_length; index++) {
+		printf("%d\t%u\n", index, next_code[index]);
+	}
+#endif
+
+	for (index = 0; index < 19; index++) {
 		if (lengths[index] != 0) {
 			table[index] = next_code[lengths[index]]++;
 		} else {
 			table[index] = 0;
 		}
-		print_bits(&table[index], sizeof(*table));
 	}
+
+#ifdef ZLIB_DEBUG
+
+// TODO: The symbol mapping is incorrect when sorted
+//	qsort(table, 19, sizeof(*table), comp);
+//	qsort(lengths, 19, sizeof(*lengths), comp);
+
+
+	puts("\nsymbol\tlength\tcode");
+	for (index = 0; index < 19; index++) {
+		printf("%u\t%u\t", index, lengths[index]);
+		_zlib_print_byte(table[index]);
+		puts("");
+	}
+#endif
 }
 
-bool
+// TODO: Theoretical huffman tree implmentation
+/*
+ * A binary tree shall be constructed, reading from LSB to MSB, a 0 bit
+ * indicating a left child and a 1 bit indicating a right child. Each of these
+ * BT nodes shall have the following data: the code (the walk the algorithm
+ * has preformed), the length, and the symbol.
+ *
+ * This tree might also be a min heap tree, look into that and reuse
+ * algorithms if necessary.
+ *
+ * In the decoding algorithm, the decoder shall consume a bit at a time,
+ * and in the process walk the tree. If at any point there are no children or
+ * the bit pattern of the walk matches that of the code, then there is a match,
+ * and insert the symbol into the output stream.
+ */
+void
 zlib_inflate(struct zlib_stream* input, struct zlib_stream* output)
 {
-	unsigned int table[ZLIB_MAX_SYMBOLS],
-		code_length_code_lengths[ZLIB_NUM_CODE_LENGTH_CODES];
-
 	struct _zlib_header header;
 	struct _zlib_block_header block_header;
 	struct _zlib_block_format block_format;
 
 	_zlib_stream_read_header(input, &header);
-	printf("%ld\n", input->cursor - input->buffer);
 	_zlib_stream_verify_header(&header);
 	_zlib_stream_read_block_header(input, &block_header);
-	_zlib_stream_read_block_format(input, &block_format);
 
-	puts("[ZLIB] Block header:\n");
-	printf("\t[ZLIB] Final: %d\n", block_header.block_final);
-	printf("\t[ZLIB] Type: %d\n", block_header.block_type);
+	// TODO: Remember to reflect changes using huffman tree here.
+
+	unsigned int table[ZLIB_MAX_SYMBOLS],
+		code_length_code_lengths[ZLIB_NUM_CODE_LENGTH_CODES];
 
 	switch (block_header.block_type) {
 	case ZLIB_BLOCK_TYPE_NONE:
@@ -301,14 +355,14 @@ zlib_inflate(struct zlib_stream* input, struct zlib_stream* output)
 		break;
 	case ZLIB_BLOCK_TYPE_DYNAMIC:
 		puts("[ZLIB] Dynamic huffman block.");
-		_zlib_stream_read_code_length_code_lengths(input, &block_format,
+		_zlib_stream_read_block_format(input, &block_format);
+		_zlib_stream_read_code_length_code_lengths(input, block_format.ncodes,
 			code_length_code_lengths);
 
-		_zlib_huffman_tree_construct(table, code_length_code_lengths, 19, 7);
+		_zlib_huffman_tree_construct(table, code_length_code_lengths,
+			block_format.ncodes);
 		break;
 	default:
 		_zlib_fatal_error("[ZLIB] Unknown block type.\n");
 	}
-
-	return true;
 }

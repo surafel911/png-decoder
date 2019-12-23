@@ -1,5 +1,5 @@
 CC = clang
-CFLAGS = -m64 -Wall -Werror -std=c99
+CFLAGS = -m64 -Wall -std=c99
 BINARY = png-decoder
 INCLUDES = -I include/
 LIBDIR = 
@@ -8,10 +8,10 @@ TEST = test/*.c
 SOURCES = src/*.c
 
 all:
-	$(CC) -g $(CFLAGS) $(INCLUDES) $(LIBDIR) $(SOURCES) \
+	$(CC) -g -D ZLIB_DEBUG $(CFLAGS) $(INCLUDES) $(LIBDIR) $(SOURCES) \
 		$(LIBRARIES) $(TEST) -o bin/$(BINARY)
 
 export:
-	$(CC) -O3 $(CFLAGS) $(INCLUDES) $(LIBDIR) $(SOURCES) \
+	$(CC) -O3 -Werror $(CFLAGS) $(INCLUDES) $(LIBDIR) $(SOURCES) \
 		$(LIBRARIES) $(TEST) -o bin/$(BINARY)
 
