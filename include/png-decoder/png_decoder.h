@@ -1,5 +1,5 @@
-#ifndef PNG_PNG_DECODER_H
-#define PNG_PNG_DECODER_H
+#ifndef PNG_DECODER_H
+#define PNG_DECODER_H
 
 #include <stdint.h>
 
@@ -11,4 +11,4 @@ struct png_image {
 void
 png_load(const char* path, struct png_image* image);
 
-#endif // PNG_PNG_DECODER_H
+#endif // PNG_DECODER_H

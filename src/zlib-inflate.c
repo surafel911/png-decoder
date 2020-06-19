@@ -46,12 +46,11 @@ struct _zlib_stream_uncompressed_header {
 	uint32_t length, nlength;
 };
 
-struct _zlib_huffman_tree_node {
-	uint8_t code, symbol, length;
-};
-
 struct _zlib_huffman_tree {
-	struct _zlib_huffman_tree_node* nodes;
+	unsigned int* codes;
+	unsigned int* symbol;
+	unsigned int* lengths;
+
 	size_t size;
 };
 
@@ -210,8 +209,7 @@ _zlib_stream_inflate_uncompressed_block(struct zlib_stream* input,
 
 static void
 _zlib_stream_read_code_length_code_lengths(struct zlib_stream* stream,
-	unsigned int ncodes,
-	unsigned int code_length_code_lengths[ZLIB_NUM_CODE_LENGTH_CODES])
+	unsigned int* unsigned int ncodes)
 {
 	static unsigned int code_length_code_lengths_order[] = {
 		16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
@@ -253,7 +251,7 @@ comp(const void* a, const void* b)
 
 // TODO: Reimplement this function to use the huffman tree structure.
 static void
-_zlib_huffman_tree_construct(unsigned int* table,
+_zlib_huffman_table_construct(unsigned int* table,
 	unsigned int* lengths, const unsigned int ncodes)
 {
 	unsigned int index, max_length, next_code[ZLIB_MAX_SYMBOLS],
@@ -314,6 +312,13 @@ _zlib_huffman_tree_construct(unsigned int* table,
 		puts("");
 	}
 #endif
+}
+
+static void
+_zlib_huffman_tree_create(struct _zlib_huffman_tree* tree,
+	unsigned int* table, unsigned int* lengths)
+{
+	
 }
 
 // TODO: Theoretical huffman tree implmentation
